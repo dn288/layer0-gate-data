@@ -21,6 +21,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main          # always the branch head, even on "Re-run jobs" of an older run
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -43,10 +46,15 @@ jobs:
           git add data/gate_state.json
           if git diff --cached --quiet; then
             echo "no change"
-          else
-            git commit -m "gate_state $(date -u +%Y-%m-%dT%H:%MZ)"
-            git push
+            exit 0
           fi
+          git commit -m "gate_state $(date -u +%Y-%m-%dT%H:%MZ)"
+          # main may have moved during the run (another scheduled run, or a code push): rebase and retry
+          for i in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git fetch origin main && git rebase origin/main || { git rebase --abort; exit 1; }
+          done
+          exit 1
 
       - name: Summary
         run: |
