@@ -95,11 +95,19 @@ def yahoo(ticker):
 def cboe(index):
     txt = get("https://cdn.cboe.com/api/global/us_indices/daily_prices/%s_History.csv" % index)
     rows = []
-    for r in csv.DictReader(io.StringIO(txt)):
-        d = r.get("DATE") or r.get("Date"); c = r.get("CLOSE") or r.get("Close")
+    rdr = csv.DictReader(io.StringIO(txt))
+    cols = [c.strip() for c in (rdr.fieldnames or [])]
+    dcol = next((c for c in cols if c.upper() == "DATE"), None)
+    vcol = next((c for c in cols if c.upper() == "CLOSE"), None) or next((c for c in cols if c.upper() == index.upper()), None) \
+           or (cols[-1] if len(cols) >= 2 else None)   # VVIX_History.csv is DATE,VVIX — no CLOSE column
+    if not dcol or not vcol: raise RuntimeError("CBOE %s: unexpected columns %s" % (index, cols))
+    for r in rdr:
+        d = (r.get(dcol) or "").strip(); c = (r.get(vcol) or "").strip()
         if not d or not c: continue
-        m, dd, y = d.split("/")
-        rows.append({"date": "%s-%s-%s" % (y, m, dd), "value": round(float(c), 4)})
+        try:
+            if "/" in d: m, dd, y = d.split("/"); d = "%s-%02d-%02d" % (y, int(m), int(dd))
+            rows.append({"date": d, "value": round(float(c), 4)})
+        except ValueError: continue
     return clip(rows)
 
 # ---------- Fallbacks ----------
@@ -124,8 +132,7 @@ def chicagofed_nfci():
         rows.append({"date": "%s-%s-%s" % (y, m, d), "value": float(r["NFCI"])})
     return clip(rows)
 
-def aaii():
-    html = get("https://www.aaii.com/sentimentsurvey/sent_results")
+def aaii_parse(html):
     txt = re.sub(r"<[^>]+>", " ", html)
     txt = re.sub(r"\s+", " ", txt)
     # rows look like: "Oct 21 36.9% 17.3% 45.8%"
@@ -143,6 +150,21 @@ def aaii():
         rows.append({"date": d.isoformat(), "value": round(float(m.group(3)) - float(m.group(5)), 1)})
     if not rows: raise RuntimeError("AAII table not parsed")
     return clip(rows)
+
+def aaii():
+    return aaii_parse(get("https://www.aaii.com/sentimentsurvey/sent_results"))
+
+def aaii_browser():
+    """aaii.com blocks plain requests from datacenter IPs; a real headless Chromium usually passes.
+    Requires `pip install playwright && playwright install --with-deps chromium` (done in the workflow)."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        b = pw.chromium.launch()
+        pg = b.new_page(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+        pg.goto("https://www.aaii.com/sentimentsurvey/sent_results", wait_until="domcontentloaded", timeout=60000)
+        pg.wait_for_timeout(4000)
+        html = pg.content(); b.close()
+    return aaii_parse(html)
 
 def acm():
     import xlrd  # pip install xlrd
@@ -165,7 +187,7 @@ SERIES = [
     ("nfci",     "weekly", [("FRED NFCI", lambda: fred("NFCI")), ("Chicago Fed CSV", lambda: (chicagofed_nfci(), "Chicago Fed CSV"))]),
     ("dgs30",    "daily",  [("FRED DGS30", lambda: fred("DGS30")), ("Fed H.15", lambda: (h15_dgs30(), "Fed H.15"))]),
     ("claims",   "weekly", [("FRED IC4WSA", lambda: fred("IC4WSA"))]),
-    ("aaii",     "weekly", [("AAII", lambda: (aaii(), "AAII sent_results"))]),
+    ("aaii",     "weekly", [("AAII", lambda: (aaii(), "AAII sent_results")), ("AAII (headless browser)", lambda: (aaii_browser(), "AAII sent_results (browser)"))]),
     ("vvix",     "daily",  [("CBOE VVIX", lambda: (cboe("VVIX"), "CBOE VVIX_History")), ("Yahoo ^VVIX", lambda: (yahoo("^VVIX"), "Yahoo ^VVIX"))]),
     ("usdjpy",   "daily",  [("Yahoo JPY=X", lambda: (yahoo("JPY=X"), "Yahoo JPY=X"))]),
     ("acm_tp",   "daily",  [("NY Fed ACM", lambda: (acm(), "NY Fed ACMTermPremium"))]),
