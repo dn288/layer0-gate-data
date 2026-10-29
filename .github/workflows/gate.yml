@@ -1,0 +1,57 @@
+name: Layer 0 gate data
+
+on:
+  schedule:
+    # 22:40 UTC (06:40 MYT) — after the US close and after FRED/NY Fed post the day's values
+    # 10:40 UTC (18:40 MYT) — picks up NFCI (Wed), claims (Thu), AAII (Thu) and any late FRED revisions
+    - cron: "40 22 * * 1-5"
+    - cron: "40 10 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gate-data
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet xlrd==2.0.2
+
+      - name: Fetch all series
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}   # optional; fredgraph.csv is used when unset
+        run: python fetch_gate.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "gate-bot"
+          git config user.email "gate-bot@users.noreply.github.com"
+          git add data/gate_state.json
+          if git diff --cached --quiet; then
+            echo "no change"
+          else
+            git commit -m "gate_state $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
+
+      - name: Summary
+        run: |
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          s = json.load(open("data/gate_state.json"))
+          print("| id | as of | stale | source |"); print("|---|---|---|---|")
+          for k, m in s["meta"].items():
+              print(f"| {k} | {m['asof']} | {m['stale_days']}d | {m['source']} |")
+          print(); print("failed:", ", ".join(s["failed_series"]) or "none")
+          EOF
